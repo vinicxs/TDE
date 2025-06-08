@@ -1,0 +1,173 @@
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <UniversalTelegramBot.h>
+#include <HTTPClient.h>
+#include <base64.h>
+
+// ========= CONFIGURAÇÕES DE REDE ========= //
+const char* ssid = "CASA_CHELLA";      // Nome da sua rede WiFi
+const char* password = "Elo13ho3!!";   // Senha da rede
+
+// ========= CONFIGURAÇÕES TELEGRAM ========= //
+#define BOT_TOKEN "7242194211:AAGIsbXdvgD73ZUjp2Q_-d5XomDrJjiE8WM"
+#define CHAT_ID "5262259392"
+
+// ========= CONFIGURAÇÕES OBS ========= //
+const String OBS_IP = "192.168.0.105";  // Substitua pelo IP do seu PC na rede
+const String OBS_PASSWORD = "projesp32";  // Senha definida no OBS WebSocket
+
+// ========= CONFIGURAÇÕES DE HARDWARE ========= //
+const int IR_PIN = 13;      // Sensor IR (TCRT5000)
+const int BUZZER_PIN = 12;  // Buzzer ativo
+const int LED_PIN = 2;      // LED interno do ESP32 (indicador de status)
+
+// ========= VARIÁVEIS GLOBAIS ========= //
+WiFiClientSecure secured_client;
+UniversalTelegramBot bot(BOT_TOKEN, secured_client);
+
+unsigned long lastReconnectAttempt = 0;
+const long RECONNECT_INTERVAL = 10000;  // Tentar reconectar a cada 10 segundos
+
+unsigned long lastAlertTime = 0;
+const long ALERT_COOLDOWN = 30000;      // 30 segundos entre alertas
+
+bool objectDetected = false;
+const int DETECTION_THRESHOLD = 3;      // Leituras consecutivas para confirmar detecção
+int detectionCount = 0;
+
+// ========= PROTÓTIPOS DE FUNÇÕES ========= //
+bool testOBSConnection();
+void connectToWiFi();
+void triggerAlarm();
+void controlOBS(bool start);
+void checkSensor();
+
+// ========= FUNÇÕES PRINCIPAIS ========= //
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Configuração dos pinos
+  pinMode(IR_PIN, INPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+  
+  // Configuração de segurança para Telegram
+  secured_client.setCACert(TELEGRAM_CERTIFICATE_ROOT);
+  
+  // Primeira conexão WiFi
+  connectToWiFi();
+}
+
+void connectToWiFi() {
+  Serial.println("\nConectando à rede WiFi...");
+  WiFi.begin(ssid, password);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    digitalWrite(LED_PIN, !digitalRead(LED_PIN)); // Pisca LED durante tentativa
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nConectado com sucesso!");
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+    digitalWrite(LED_PIN, HIGH); // LED aceso = conectado
+    bot.sendMessage(CHAT_ID, "✅ Sistema conectado à CASA_CHELLA e pronto!", "");
+  } else {
+    Serial.println("\nFalha na conexão WiFi");
+    digitalWrite(LED_PIN, LOW);
+  }
+}
+
+bool testOBSConnection() {
+  HTTPClient http;
+  http.begin("http://" + OBS_IP + ":4455/status");
+  http.addHeader("Authorization", "Basic " + base64::encode("obswebsocket:" + OBS_PASSWORD));
+  
+  int httpCode = http.GET();
+  http.end();
+  
+  if (httpCode == 200) {
+    Serial.println("Conexão com OBS estabelecida com sucesso!");
+    return true;
+  } else {
+    Serial.println("Falha ao conectar com OBS. Código de erro: " + String(httpCode));
+    return false;
+  }
+}
+
+void triggerAlarm() {
+  const int BUZZER_FREQ = 2000; // Hz (tom agudo)
+  const int DURATION = 10000;   // 10 segundos
+
+  // Para buzzers ATIVOS:
+  digitalWrite(BUZZER_PIN, HIGH); // Liga continuamente
+  delay(DURATION);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  // Para buzzers PASSIVOS (descomente se necessário):
+  // tone(BUZZER_PIN, BUZZER_FREQ, DURATION);
+  
+  Serial.println("Buzzer acionado!");
+}
+
+void controlOBS(bool start) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    String command = start ? "start" : "stop";
+    
+    http.begin("http://" + OBS_IP + ":4455/record/" + command);
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Authorization", "Basic " + base64::encode("obswebsocket:" + OBS_PASSWORD));
+    
+    int httpCode = http.POST("{}");
+    if (httpCode == 200) {
+      Serial.println("Comando OBS executado: " + command);
+    } else {
+      Serial.println("Erro no OBS: " + String(httpCode));
+    }
+    http.end();
+  }
+}
+
+void checkSensor() {
+  int irValue = digitalRead(IR_PIN);
+  
+  // Lógica de detecção com debounce
+  if (irValue == LOW) { // Objeto detectado (LOW = detectado para TCRT5000)
+    detectionCount++;
+    
+    if (detectionCount >= DETECTION_THRESHOLD && !objectDetected && 
+        (millis() - lastAlertTime > ALERT_COOLDOWN)) {
+      objectDetected = true;
+      lastAlertTime = millis();
+      Serial.println("Objeto detectado - Acionando alarme!");
+      triggerAlarm();
+    }
+  } else {
+    detectionCount = 0;
+    objectDetected = false;
+  }
+}
+
+void loop() {
+  // Verifica conexão WiFi periodicamente
+  if (WiFi.status() != WL_CONNECTED && 
+      millis() - lastReconnectAttempt > RECONNECT_INTERVAL) {
+    lastReconnectAttempt = millis();
+    WiFi.disconnect();
+    connectToWiFi();
+  }
+  
+  // Verifica sensor apenas se conectado
+  if (WiFi.status() == WL_CONNECTED) {
+    checkSensor();
+  }
+  
+  delay(100); // Pequeno delay para evitar sobrecarga
+}
